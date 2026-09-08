@@ -1,0 +1,97 @@
+version: "1"
+
+package:
+  id: com.github.cutecom
+  name: CuteCom
+  version: 0.30.3.0
+  kind: app
+  description: |
+    CuteCom is a graphical serial terminal, like minicom. It is aimed mainly at
+    hardware developers or other people who need a terminal to talk to their
+    devices. It features a lineoriented interface instead of character-oriented,
+    xmodem, ymodem, zmodem support and hexadecimal input and output.
+    It is written using the Qt library.
+
+command:
+  - /opt/apps/com.github.cutecom/files/bin/cutecom
+
+base: org.deepin.base/23.1.0
+runtime: org.deepin.runtime.dtk/23.1.0
+
+sources:
+  - kind: archive
+    url: https://share.cicd.getdeepin.org/ziggy-pool/linyaps-apps-packaging-CI/25M8.top500-init.stage-1.sysRepo/cutecom_0.30.3.orig.tar.gz
+    digest: fb110a6f0af50780856fa8bcbe6f46e1d48687a0df849af03977decd0fb08855
+  - kind: archive
+    url: https://share.cicd.getdeepin.org/ziggy-pool/linyaps-apps-packaging-CI/25M8.top500-init.stage-1.sysRepo/cutecom_0.30.3-1.debian.tar.xz
+    digest: d42d64f17391deedc439ad63d1b1e3a10420bca45f0a7381a727b234f3efa4e0
+
+buildext:
+  apt:
+    depends:
+      - libqt5serialport5
+
+build: |
+  set -e
+
+  # fix dead apt source baked into base (deepin-community/backup/rc2 no longer available)
+  cat > /etc/apt/sources.list <<'APT'
+  deb [trusted=yes] https://ci.deepin.com/repo/deepin/deepin-community/stable beige main
+  APT
+  echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99linglong-builder.conf
+  apt-get update -y
+
+  # build-time tooling (cmake is avoided: its libuv uv_spawn assertion crashes in this
+  # container, so we build with the shipped qmake project instead)
+  DEBIAN_FRONTEND=noninteractive apt-get install -y qtbase5-dev qt5-qmake qtbase5-dev-tools libqt5serialport5-dev
+
+  SRC=/project/linglong/sources/cutecom_0.30.3.orig.tar.gz/cutecom-0.30.3
+  DEB=/project/linglong/sources/cutecom_0.30.3-1.debian.tar.xz/debian
+
+  cd $SRC
+
+  # apply the Debian patch series (man page update)
+  if [ -f $DEB/patches/series ]; then
+    for p in $(cat $DEB/patches/series); do
+      patch -p1 < $DEB/patches/$p
+    done
+  fi
+
+  # generate version.h (normally produced by the cmake configure step)
+  sed 's/@CuteCom_VERSION@/0.30.3/' version.h.in > version.h
+
+  # build with qmake (the project ships a Qt Creator .pro)
+  mkdir -p build
+  cd build
+  QMAKE=""
+  for c in /usr/lib/qt5/bin/qmake /usr/lib/x86_64-linux-gnu/qt5/bin/qmake /usr/bin/qmake; do
+    if [ -x "$c" ]; then QMAKE=$c; break; fi
+  done
+  echo "Using QMAKE=$QMAKE"
+  $QMAKE ../CuteCom.pro
+  make -j8
+
+  # install the real binary and provide a launcher that forces software rendering.
+  # In the Jenkins/CI xcb display server there is no working GPU: Mesa tries the
+  # zink driver, fails, and Qt5 aborts on first paint. Forcing software GL keeps
+  # the plain-widget app alive so the run test can pass.
+  install -d $PREFIX/bin \
+             $PREFIX/share/applications \
+             $PREFIX/share/icons/hicolor/scalable/apps
+  install -m 0755 CuteCom $PREFIX/bin/cutecom-bin
+
+  cat > $PREFIX/bin/cutecom <<'LAUNCH'
+  #!/bin/bash
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export QT_XCB_FORCE_SOFTWARE_OPENGL=1
+  exec /opt/apps/com.github.cutecom/files/bin/cutecom-bin "$@"
+  LAUNCH
+  chmod 0755 $PREFIX/bin/cutecom
+
+  install -m 0644 $SRC/distribution/openSUSE/cutecom.desktop \
+      $PREFIX/share/applications/com.github.cutecom.desktop
+  install -m 0644 $SRC/images/cutecom.svg \
+      $PREFIX/share/icons/hicolor/scalable/apps/cutecom.svg
+
+  echo "=== installed files ==="
+  find $PREFIX -maxdepth 5 \( -type f -o -type l \) | sort
